@@ -1,0 +1,8 @@
+# Local virtual environments
+venv/
+.venv/
+env/
+
+# Python caching artifacts
+__pycache__/
+*.pyc
