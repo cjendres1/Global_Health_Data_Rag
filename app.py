@@ -35,13 +35,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Pure Python deterministic vector generator matching ingestion pipelines
-def generate_vector(text: str, dimensionality: int = 384) -> np.ndarray:
-    seed = int(hashlib.sha256(text.encode('utf-8')).hexdigest(), 16) % (2**32)
-    rng = np.random.default_rng(seed)
-    vector = rng.normal(loc=0.0, scale=1.0, size=dimensionality)
-    norm = np.linalg.norm(vector)
-    return (vector / norm) if norm > 0 else vector
+from sentence_transformers import SentenceTransformer
+
+# 1. Load the Bi-Encoder for initial SQLite vector retrieval
+@st.cache_resource
+def load_vector_embedder():
+    return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+embedder = load_vector_embedder()
+
+def generate_vector(text: str) -> np.ndarray:
+    """Generates true semantic embeddings matching the SQLite vector store."""
+    embedding = embedder.encode(text, convert_to_numpy=True)
+    norm = np.linalg.norm(embedding)
+    return (embedding / norm) if norm > 0 else embedding
 
 # -----------------------------------------------------------------------------
 # 💡 PIPELINE & DATABASE INITIALIZATION
