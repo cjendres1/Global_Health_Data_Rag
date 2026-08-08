@@ -1,10 +1,26 @@
-# app.py
+import os
+import sqlite3
+import hashlib
+import numpy as np
 import streamlit as st
-import chromadb
-from chromadb.utils.embedding_functions import HuggingFaceEmbeddingFunction
-import json
+import torch
+import ollama
 
-# Set up page configurations for a professional portfolio layout
+# -----------------------------------------------------------------------------
+# 📦 IMPORT LOCAL MODULES
+# -----------------------------------------------------------------------------
+from query_parser import ClinicalQueryParser
+from neural_reranker import PyTorchNeuralReranker
+
+# Thread optimization for cloud/shared CPU stability
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+torch.set_num_threads(1)
+
+# Set page configuration
 st.set_page_config(
     page_title="Global Health Data Atlas",
     page_icon="🌐",
@@ -12,57 +28,114 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize Embedded Static ChromaDB Persistent Client
+# Deterministic vector generator matching ingestion pipelines
+def generate_vector(text: str, dimensionality: int = 384) -> np.ndarray:
+    seed = int(hashlib.sha256(text.encode('utf-8')).hexdigest(), 16) % (2**32)
+    rng = np.random.default_rng(seed)
+    vector = rng.normal(loc=0.0, scale=1.0, size=dimensionality)
+    norm = np.linalg.norm(vector)
+    return (vector / norm) if norm > 0 else vector
+
+# -----------------------------------------------------------------------------
+# 💡 PIPELINE & DATABASE INITIALIZATION
+# -----------------------------------------------------------------------------
 @st.cache_resource
-def get_chroma_client():
-    try:
-        # Instead of HttpClient(host="localhost"), we read a relative path directory
-        return chromadb.PersistentClient(path="./chroma_db_directory")
-    except Exception as e:
-        st.error(f"Could not initialize the embedded vector registry: {str(e)}")
-        return None
-
-#chroma_client = get_chroma_client()
-embedding_fn = WindowsSafeEmbedder(dimensionality=384)
-chroma_client = chromadb.PersistentClient(path="./chroma_db_directory")
-collection = chroma_client.get_collection(name="global_health_atlas", embedding_function=embedding_fn)
-
-# --- FETCH COLLECTION METRICS & ACTIVE SOURCES ---
-total_records = 0
-source_count = 0
-available_sources = []
-
-if chroma_client:
-    try:
-        collection = chroma_client.get_collection(name="global_health_atlas")
-        total_records = collection.count()
+def initialize_core_pipeline():
+    parser = ClinicalQueryParser()
+    reranker = PyTorchNeuralReranker()
+    db_path = os.path.abspath("global_health_atlas.db")
+    
+    if not os.path.exists(db_path):
+        st.error(f"⚠️ Vector database missing at `{db_path}`. Please run ingestion first.")
+        st.stop()
         
-        # Pull metadata to identify active unique sources dynamically
-        all_data = collection.get(include=["metadatas"])
-        if all_data and all_data.get("metadatas"):
-            unique_sources = set(meta.get("source") for meta in all_data["metadatas"] if meta)
-            available_sources = sorted(list(unique_sources))
-            source_count = len(available_sources)
-    except Exception as e:
-        st.warning("⚠️ Could not verify collection metrics. Ensure your pipeline ingestion has run and the Chroma server is active.")
+    return parser, reranker, db_path
 
-# --- SIDEBAR: SYSTEM METRICS & ADVANCED FILTERS ---
+try:
+    parser, reranker, db_path = initialize_core_pipeline()
+except Exception as e:
+    st.error(f"Initialization Failed: {e}")
+    st.stop()
+
+# Helper function to fetch DB stats & unique sources dynamically
+def get_db_metrics():
+    if not os.path.exists(db_path):
+        return 0, []
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*), DISTINCT source FROM health_vector_store")
+    total_records = cursor.fetchone()[0]
+    cursor.execute("SELECT DISTINCT source FROM health_vector_store WHERE source IS NOT NULL")
+    sources = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return total_records, sorted(sources)
+
+total_records, available_sources = get_db_metrics()
+source_count = len(available_sources)
+
+# -----------------------------------------------------------------------------
+# 🔍 SQLITE VECTOR RETRIEVAL LOGIC WITH METADATA FILTERING
+# -----------------------------------------------------------------------------
+def query_sqlite_vector_db(query_text: str, target_sources: list, max_dist: float, top_k: int = 15) -> list:
+    """Computes cosine similarity/distance over SQLite stored vectors with source filtering."""
+    query_vec = generate_vector(query_text)
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    if target_sources and len(target_sources) < len(available_sources):
+        placeholders = ','.join(['?'] * len(target_sources))
+        query = f"SELECT id, source, indicator_id, short_name, document, vector FROM health_vector_store WHERE source IN ({placeholders})"
+        cursor.execute(query, target_sources)
+    else:
+        cursor.execute("SELECT id, source, indicator_id, short_name, document, vector FROM health_vector_store")
+        
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return []
+
+    scores = []
+    for row in rows:
+        doc_id, source, indicator_id, short_name, document, vec_bytes = row
+        db_vec = np.frombuffer(vec_bytes, dtype=np.float32)
+        
+        # Cosine Similarity & Distance Conversion
+        similarity = float(np.dot(query_vec, db_vec))
+        distance = 1.0 - similarity  # Standard cosine distance mapping
+        
+        # Filter out records exceeding the user's distance threshold
+        if distance <= max_dist:
+            scores.append({
+                "vector_score": similarity,
+                "distance": distance,
+                "source_dataset": source,
+                "table_id": doc_id,
+                "variable_id": indicator_id,
+                "variable_name": short_name,
+                "description": document
+            })
+
+    # Sort descending by vector similarity score
+    scores.sort(key=lambda x: x["vector_score"], reverse=True)
+    return scores[:top_k]
+
+# -----------------------------------------------------------------------------
+# 🎨 SIDEBAR CONTROL CENTER
+# -----------------------------------------------------------------------------
 with st.sidebar:
     st.title("🌐 Atlas Control Center")
     st.markdown("---")
     
-    # Dynamic Search Tuning Section
     st.subheader("🎯 Search Filtering & Tuning")
-    
-    # 1. Filter by specific source registries
     selected_sources = st.multiselect(
         "Scope to Target Registries:",
         options=available_sources,
         default=available_sources,
-        help="Uncheck sources to exclude their variables from the vector search space entirely."
+        help="Uncheck sources to exclude their variables from the vector search space."
     )
     
-    # 2. Maximum Distance Threshold Slider (Cosine/L2 Precision Tuning)
     max_distance = st.slider(
         "Maximum Distance Threshold:",
         min_value=0.0,
@@ -73,158 +146,125 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.subheader("Ingestion Pipelines")
-    # Dynamically verify pipeline completion indicators
+    st.subheader("Ingestion Status")
     for src in available_sources:
         st.success(f"✅ {src} Active")
     
     st.markdown("---")
-    st.caption("Developed as a highly decoupled multi-source data engineering showcase.")
+    st.caption("Decoupled multi-source RAG data architecture.")
 
-# --- MAIN PAGE: HEADER & LAYOUT ---
-st.title("🗺️ Global Health Data Atlas")
+# -----------------------------------------------------------------------------
+# 🗺️ MAIN INTERFACE & METRICS
+# -----------------------------------------------------------------------------
+st.title("🗺️ Global Health Data Atlas AI")
 st.markdown(
     """
-    This interactive platform demonstrates a robust **Retrieval-Augmented Generation (RAG)** pipeline. 
-    It unifies disparate metadata registries and data schemas across international and domestic public health sources into a centralized, searchable vector space.
+    This platform demonstrates a **Retrieval-Augmented Generation (RAG)** pipeline, harmonizing 
+    disparate health metadata registries into a unified vector search layer with neural re-ranking.
     """
 )
-
 st.markdown("---")
 
-# Display high-level metrics banner
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric(label="Total Unified Records Ingested", value=total_records)
+    st.metric(label="Total Unified Records", value=total_records)
 with col2:
-    st.metric(label="ChromaDB Server Status", value="Connected (Port 8000)" if chroma_client else "Disconnected")
+    st.metric(label="Database Status", value="SQLite Active" if os.path.exists(db_path) else "Missing")
 with col3:
-    st.metric(label="Harmonized Schemas", value=f"{source_count} Sources Active")
+    st.metric(label="Harmonized Registries", value=f"{source_count} Sources")
 
-st.markdown("### 🔍 Semantic Search Retrieval Layer")
+st.markdown("### 🔍 Semantic Search & RAG Retrieval")
 
-# Search and parameter inputs
 user_query = st.text_input(
-    "Enter a clinical concept, health indicator, or survey question to explore across schemas:",
-    placeholder="e.g., How is patient hypertension or high blood pressure categorized?"
+    "Enter a clinical concept, health indicator, or survey question:",
+    placeholder="e.g., Query metrics examining body mass index distributions..."
 )
 
-n_results = st.slider("Max number of context matches to retrieve:", min_value=1, max_value=10, value=3)
+n_results = st.slider("Max context matches to retrieve:", min_value=1, max_value=10, value=5)
 
-# Execution phase
-if user_query and chroma_client:
+if user_query:
     if not selected_sources:
-        st.warning("⚠️ Please select at least one source in the sidebar filters to execute a search.")
+        st.warning("⚠️ Please select at least one source in the sidebar to execute a search.")
     else:
-        with st.spinner("Traversing vector space embeddings..."):
-            try:
-                # Construct metadata filter block for ChromaDB standard client syntax
-                # If all sources are selected, we don't need a constraint filter array
-                where_filter = None
-                if len(selected_sources) < len(available_sources):
-                    if len(selected_sources) == 1:
-                        where_filter = {"source": selected_sources[0]}
-                    else:
-                        where_filter = {"$or": [{"source": src} for src in selected_sources]}
+        # Step 1: spaCy Query Understanding
+        with st.spinner("Extracting structural semantics..."):
+            parsed_data = parser.parse(user_query)
+        
+        c_tok, c_dem = st.columns(2)
+        with c_tok:
+            st.caption(f"**Extracted Keywords:** {parsed_data.get('extracted_keywords', 'None')}")
+        with c_dem:
+            st.caption(f"**Inferred Demographics:** {parsed_data.get('inferred_demographics', 'General')}")
 
-                # Query the database
-                results = collection.query(
-                    query_texts=[user_query],
-                    n_results=n_results * 2, # Fetch slightly more to filter distances comfortably
-                    where=where_filter
+        # Step 2 & 3: SQLite Vector Match & PyTorch Neural Reranking
+        with st.spinner("Searching vector store & executing PyTorch reranking..."):
+            candidates = query_sqlite_vector_db(user_query, selected_sources, max_distance, top_k=n_results * 2)
+            
+            if candidates:
+                final_results = reranker.rerank(user_query, candidates)[:n_results]
+            else:
+                final_results = []
+
+        # Step 4: Display Retrieved Context Matches
+        st.markdown(f"#### 📦 Retrieved Context Blocks ({len(final_results)} Matches)")
+        
+        if not final_results:
+            st.info("No records matched your search criteria within the current distance threshold.")
+        else:
+            for idx, item in enumerate(final_results, 1):
+                with st.container():
+                    col_meta, col_dist = st.columns([4, 1])
+                    with col_meta:
+                        st.markdown(f"**Match #{idx}: `{item['variable_id']}`** — {item['variable_name']}")
+                        st.caption(f"Origin Registry: `{item['source_dataset']}` | Table ID: `{item['table_id']}`")
+                    with col_dist:
+                        st.metric(label="Distance", value=f"{item['distance']:.4f}")
+                    
+                    st.text_area(
+                        label="Metadata Context Payload",
+                        value=item['description'],
+                        height=70,
+                        key=f"doc_{idx}",
+                        disabled=True
+                    )
+                    st.markdown("---")
+
+            # -----------------------------------------------------------------
+            # 🤖 LIVE OLLAMA SYNTHESIS PHASE
+            # -----------------------------------------------------------------
+            st.markdown("### 🤖 Generation Phase (Live RAG Synthesis)")
+            with st.expander("See live local synthesis tracking", expanded=True):
+                context_str = "\n\n".join([
+                    f"[Match #{i+1} | Source: {m['source_dataset']} | Code: {m['variable_id']}]\n{m['description']}"
+                    for i, m in enumerate(final_results)
+                ])
+                
+                system_prompt = (
+                    "You are an expert global health data translation assistant. Synthesize a concise, "
+                    "integrated answer to the user's question using ONLY the provided metadata context blocks. "
+                    "If the answer cannot be verified by the text snippets, explicitly state that the "
+                    "information is not available in the current Atlas registers. Do not invent details."
                 )
                 
-                # Unpack payload structures safely
-                raw_documents = results['documents'][0]
-                raw_metadatas = results['metadatas'][0]
-                raw_distances = results['distances'][0]
-                raw_ids = results['ids'][0]
+                user_prompt = f"Context Blocks:\n{context_str}\n\nUser Question: {user_query}"
                 
-                # Filter results based on the user's maximum distance threshold selection
-                documents, metadatas, distances, ids = [], [], [], []
-                for i in range(len(raw_documents)):
-                    if raw_distances[i] <= max_distance:
-                        documents.append(raw_documents[i])
-                        metadatas.append(raw_metadatas[i])
-                        distances.append(raw_distances[i])
-                        ids.append(raw_ids[i])
-                        if len(documents) == n_results:  # Stop once we fulfill user requested count
-                            break
+                st.caption("**System Prompt:** " + system_prompt)
+                st.markdown("**Generated Response (Streaming from Llama 3.2 via Ollama):**")
                 
-                st.markdown(f"#### 📦 Retrieved Context Blocks ({len(documents)} Matches)")
-                
-                if not documents:
-                    st.info("No records found matching your query within the current distance threshold or selected sources.")
-                
-                # Render each match inside a clean custom container
-                for i in range(len(documents)):
-                    with st.container():
-                        col_meta, col_dist = st.columns([4, 1])
-                        
-                        source_provider = metadatas[i].get("source", "UNKNOWN")
-                        indicator_id = metadatas[i].get("indicator_id", "N/A")
-                        
-                        with col_meta:
-                            st.markdown(f"**Match #{i+1}: Source ID: `{ids[i]}`**")
-                            st.caption(f"Origin Registry: `{source_provider}` | Structural Code: `{indicator_id}`")
-                        with col_dist:
-                            # Vector distance confidence mapping metric
-                            st.metric(label="Semantic Distance", value=f"{distances[i]:.4f}")
-                            
-                        st.text_area(
-                            label="Unified Text Payload", 
-                            value=documents[i], 
-                            height=70, 
-                            key=f"doc_{i}",
-                            disabled=True
+                def ollama_stream_generator():
+                    try:
+                        stream = ollama.chat(
+                            model="llama3.2",
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt}
+                            ],
+                            stream=True
                         )
-                        st.markdown("---")
-                
-# --- LIVE LOCAL LLM GENERATION PHASE ---
-                st.markdown("### 🤖 Generation Phase (Live RAG Synthesis)")
-                
-                with st.expander("See live local synthesis tracking", expanded=True):
-                    if not documents:
-                        st.info("No context blocks available to pass to the inference model.")
-                    else:
-                        import ollama
-                        
-                        # Pack the distinct snippets cleanly into a text summary for the context prompt
-                        context_str = "\n\n".join([
-                            f"[Match #{idx+1} | Source: {meta.get('source')} | Code: {meta.get('indicator_id')}]\n{doc}"
-                            for idx, (doc, meta) in enumerate(zip(documents, metadatas))
-                        ])
-                        
-                        # Design a clean prompt grounding the model strictly to your ChromaDB findings
-                        system_prompt = (
-                            "You are an expert global health data translation assistant. Synthesize a concise, "
-                            "integrated answer to the user's question using ONLY the provided metadata context blocks. "
-                            "If the answer cannot be verified by the text snippets, explicitly state that the "
-                            "information is not available in the current Atlas registers. Do not invent details."
-                        )
-                        
-                        user_prompt = f"Context Blocks:\n{context_str}\n\nUser Question: {user_query}"
-                        
-                        st.markdown("**System Instructions Given to LLM:**")
-                        st.caption(system_prompt)
-                        
-                        st.markdown("**Generated Response (Streaming from llama3.2):**")
-                        
-                        # Create a generator function to stream response chunks to st.write_stream
-                        def ollama_stream_generator():
-                            stream = ollama.chat(
-                                model="llama3.2",
-                                messages=[
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt}
-                                ],
-                                stream=True
-                            )
-                            for chunk in stream:
-                                yield chunk['message']['content']
-                        
-                        # Stream the text output live onto the page interface
-                        st.write_stream(ollama_stream_generator)
+                        for chunk in stream:
+                            yield chunk['message']['content']
+                    except Exception as err:
+                        yield f"\n⚠️ Ollama stream error: {err}. Ensure Ollama is running locally (`ollama run llama3.2`)."
 
-            except Exception as e:
-                st.error(f"Error querying vector records or generating text: {str(e)}")
+                st.write_stream(ollama_stream_generator)
+                
