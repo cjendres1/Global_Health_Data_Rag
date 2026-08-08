@@ -4,7 +4,13 @@ import hashlib
 import numpy as np
 import streamlit as st
 import torch
-import ollama
+
+# Gracefully handle optional local Ollama dependency
+try:
+    import ollama
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
 
 # -----------------------------------------------------------------------------
 # 📦 IMPORT LOCAL MODULES
@@ -12,12 +18,13 @@ import ollama
 from query_parser import ClinicalQueryParser
 from neural_reranker import PyTorchNeuralReranker
 
-# Thread optimization for cloud/shared CPU stability
+# Clamp thread pools to prevent CPU throttling on shared cloud hosts
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 torch.set_num_threads(1)
 
 # Set page configuration
@@ -28,7 +35,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Deterministic vector generator matching ingestion pipelines
+# Pure Python deterministic vector generator matching ingestion pipelines
 def generate_vector(text: str, dimensionality: int = 384) -> np.ndarray:
     seed = int(hashlib.sha256(text.encode('utf-8')).hexdigest(), 16) % (2**32)
     rng = np.random.default_rng(seed)
@@ -63,7 +70,7 @@ def get_db_metrics():
         return 0, []
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*), DISTINCT source FROM health_vector_store")
+    cursor.execute("SELECT COUNT(*) FROM health_vector_store")
     total_records = cursor.fetchone()[0]
     cursor.execute("SELECT DISTINCT source FROM health_vector_store WHERE source IS NOT NULL")
     sources = [row[0] for row in cursor.fetchall()]
@@ -103,7 +110,7 @@ def query_sqlite_vector_db(query_text: str, target_sources: list, max_dist: floa
         
         # Cosine Similarity & Distance Conversion
         similarity = float(np.dot(query_vec, db_vec))
-        distance = 1.0 - similarity  # Standard cosine distance mapping
+        distance = 1.0 - similarity
         
         # Filter out records exceeding the user's distance threshold
         if distance <= max_dist:
@@ -230,10 +237,10 @@ if user_query:
                     st.markdown("---")
 
             # -----------------------------------------------------------------
-            # 🤖 LIVE OLLAMA SYNTHESIS PHASE
+            # 🤖 SYNTHESIS GENERATION PHASE
             # -----------------------------------------------------------------
             st.markdown("### 🤖 Generation Phase (Live RAG Synthesis)")
-            with st.expander("See live local synthesis tracking", expanded=True):
+            with st.expander("See live synthesis tracking", expanded=True):
                 context_str = "\n\n".join([
                     f"[Match #{i+1} | Source: {m['source_dataset']} | Code: {m['variable_id']}]\n{m['description']}"
                     for i, m in enumerate(final_results)
@@ -249,22 +256,24 @@ if user_query:
                 user_prompt = f"Context Blocks:\n{context_str}\n\nUser Question: {user_query}"
                 
                 st.caption("**System Prompt:** " + system_prompt)
-                st.markdown("**Generated Response (Streaming from Llama 3.2 via Ollama):**")
                 
-                def ollama_stream_generator():
-                    try:
-                        stream = ollama.chat(
-                            model="llama3.2",
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_prompt}
-                            ],
-                            stream=True
-                        )
-                        for chunk in stream:
-                            yield chunk['message']['content']
-                    except Exception as err:
-                        yield f"\n⚠️ Ollama stream error: {err}. Ensure Ollama is running locally (`ollama run llama3.2`)."
+                if OLLAMA_AVAILABLE:
+                    st.markdown("**Generated Response (Streaming from Llama 3.2 via Ollama):**")
+                    def ollama_stream_generator():
+                        try:
+                            stream = ollama.chat(
+                                model="llama3.2",
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt}
+                                ],
+                                stream=True
+                            )
+                            for chunk in stream:
+                                yield chunk['message']['content']
+                        except Exception as err:
+                            yield f"\n⚠️ Local Ollama daemon unreachable: {err}. Ensure `ollama serve` is running."
 
-                st.write_stream(ollama_stream_generator)
-                
+                    st.write_stream(ollama_stream_generator)
+                else:
+                    st.info("💡 **Cloud Mode Active:** Ollama local LLM inference is disabled in cloud hosting environments. The dense vector matches and PyTorch neural reranked contexts above represent your retrieved RAG context window.")
