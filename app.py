@@ -17,6 +17,7 @@ except ImportError:
 # -----------------------------------------------------------------------------
 from query_parser import ClinicalQueryParser
 from neural_reranker import PyTorchNeuralReranker
+from sentence_transformers import SentenceTransformer
 
 # Clamp thread pools to prevent CPU throttling on shared cloud hosts
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -35,7 +36,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-from sentence_transformers import SentenceTransformer
 
 # 1. Load the Bi-Encoder for initial SQLite vector retrieval
 @st.cache_resource
@@ -45,10 +45,9 @@ def load_vector_embedder():
 embedder = load_vector_embedder()
 
 def generate_vector(text: str) -> np.ndarray:
-    """Generates true semantic embeddings matching the SQLite vector store."""
-    embedding = embedder.encode(text, convert_to_numpy=True)
-    norm = np.linalg.norm(embedding)
-    return (embedding / norm) if norm > 0 else embedding
+    """Generates 384-d normalized float32 vector matching SQLite store."""
+    embedding = embedder.encode(text, convert_to_numpy=True, normalize_embeddings=True)
+    return embedding.astype(np.float32)
 
 # -----------------------------------------------------------------------------
 # 💡 PIPELINE & DATABASE INITIALIZATION
