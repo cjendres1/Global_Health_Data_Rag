@@ -8,6 +8,7 @@ import streamlit as st
 import torch
 import chromadb
 from sentence_transformers import SentenceTransformer
+from data_fetcher import fetch_live_data, fetch_all_live_data
 
 # Gracefully handle optional local Ollama dependency
 try:
@@ -238,124 +239,125 @@ if user_query:
                     )
                     st.markdown("---")
 
-            # -----------------------------------------------------------------
-            # 🛠️ EXPORT RESULTS & INGESTION TOOLS
-            # -----------------------------------------------------------------
-            st.markdown("### 🛠️ Export Results & Ingestion Tools")
+# -----------------------------------------------------------------
+# 🛠️ LIVE DATA EXPORT & AUTOMATED INGESTION
+# -----------------------------------------------------------------
+st.markdown("### 🛠️ Live Observations Export & Ingestion")
 
-            export_records = [
-                {
-                    "rank": rank,
-                    "variable_id": item.get("variable_id", ""),
-                    "variable_name": item.get("variable_name", ""),
-                    "source_dataset": item.get("source_dataset", ""),
-                    "table_id": item.get("table_id", ""),
-                    "rerank_score": round(float(item.get("rerank_score", 0.0)), 4),
-                    "chroma_distance": round(float(item.get("distance", 0.0)), 4),
-                    "description": item.get("description", "")
-                }
-                for rank, item in enumerate(final_results, 1)
-            ]
-            df_results = pd.DataFrame(export_records)
+with st.spinner("Fetching live health observations across retrieved match endpoints..."):
+    # Pull actual health observations for top matches
+    df_raw_combined = fetch_all_live_data(export_records, limit_per_var=50)
 
-            tab_table, tab_code = st.tabs(["📊 Data Table & Downloads", "🐍 Python Import Script"])
+tab_table, tab_code = st.tabs(["📊 Raw Observation Data", "🐍 Python Import Script"])
 
-            with tab_table:
-                st.markdown("**Structured Search Results**")
-                st.dataframe(df_results, use_container_width=True, hide_index=True)
+with tab_table:
+    if not df_raw_combined.empty:
+        st.markdown(f"**Retrieved Microdata Records ({len(df_raw_combined)} rows)**")
+        st.dataframe(df_raw_combined, use_container_width=True, hide_index=True)
 
-                col_csv, col_json = st.columns(2)
-                with col_csv:
-                    st.download_button(
-                        label="📥 Download CSV Table",
-                        data=df_results.to_csv(index=False).encode('utf-8'),
-                        file_name="atlas_search_results.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                        key="download_csv_btn"
-                    )
-                with col_json:
-                    st.download_button(
-                        label="📥 Download JSON Metadata",
-                        data=df_results.to_json(orient="records", indent=2),
-                        file_name="atlas_search_results.json",
-                        mime="application/json",
-                        use_container_width=True,
-                        key="download_json_btn"
-                    )
+        col_csv, col_json = st.columns(2)
+        with col_csv:
+            st.download_button(
+                label="📥 Download Fetched Observations (CSV)",
+                data=df_raw_combined.to_csv(index=False).encode('utf-8'),
+                file_name="atlas_live_observations.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="download_live_csv_btn"
+            )
+        with col_json:
+            st.download_button(
+                label="📥 Download Fetched Observations (JSON)",
+                data=df_raw_combined.to_json(orient="records", indent=2),
+                file_name="atlas_live_observations.json",
+                mime="application/json",
+                use_container_width=True,
+                key="download_live_json_btn"
+            )
+    else:
+        st.info("No live observation records could be automatically fetched for the current matches. Check API connectivity.")
 
-            with tab_code:
-                st.markdown("Copy and paste this snippet to query these exact variable IDs programmatically:")
-                
-                target_ids = [
-                    str(item.get("variable_id")) 
-                    for item in export_records 
-                    if item.get("variable_id") is not None and str(item.get("variable_id")).strip() != ""
-                ]
-                
-                python_snippet = f'''import pandas as pd
-import chromadb
+with tab_code:
+    st.markdown("Copy and paste this Python script to pull these raw observations directly into your workspace or notebook:")
+    
+    # Extract distinct registries and variables for the script
+    target_ids = [str(r["variable_id"]) for r in export_records if r.get("variable_id")]
+    
+    python_snippet = f'''import pandas as pd
+import requests
 
-# 1. Connect to ChromaDB instance
-client = chromadb.PersistentClient(path="data/chroma_db")
-collection = client.get_collection(name="global_health_atlas")
+# 1. Target Variables retrieved from Global Health Atlas search
+target_variables = {target_ids}
 
-# 2. Target Variable Identifiers retrieved from UI search
-target_variable_ids = {target_ids}
+def fetch_atlas_health_data(variable_id):
+"""Fetches live health observation records from open API endpoints."""
+# Example WHO GHO Endpoint fetch
+url = f"https://ghoapi.azureedge.net/api/{{variable_id}}"
+try:
+res = requests.get(url, timeout=10)
+if res.status_code == 200:
+data = res.json().get("value", [])
+df = pd.DataFrame(data)
+df["variable_id"] = variable_id
+return df
+except Exception as e:
+print(f"Error fetching {{variable_id}}: {{e}}")
+return pd.DataFrame()
 
-# 3. Retrieve metadata directly from persistent collection
-results = collection.get(
-    ids=target_variable_ids,
-    include=["metadatas", "documents"]
-)
+# 2. Iterate and combine fetched observation datasets
+all_data = []
+for var_id in target_variables:
+df_var = fetch_atlas_health_data(var_id)
+if not df_var.empty:
+all_data.append(df_var)
 
-# 4. Convert results into pandas DataFrame
-df_query = pd.DataFrame(results["metadatas"])
-df_query["description"] = results["documents"]
-
-print(f"Loaded {{len(df_query)}} metadata entries.")
-print(df_query.head())
+if all_data:
+df_combined = pd.concat(all_data, ignore_index=True)
+print(f"Successfully loaded {{len(df_combined)}} live observation rows.")
+print(df_combined.head())
+else:
+print("No observations returned.")
 '''
-                st.code(python_snippet, language="python")
+    st.code(python_snippet, language="python")
 
-            # -----------------------------------------------------------------
-            # 🤖 SYNTHESIS GENERATION PHASE
-            # -----------------------------------------------------------------
-            st.markdown("### 🤖 Generation Phase (Live RAG Synthesis)")
-            with st.expander("See live synthesis tracking", expanded=True):
-                context_str = "\n\n".join([
-                    f"[Match #{i+1} | Source: {m.get('source_dataset', 'N/A')} | Code: {m.get('variable_id', 'N/A')}]\n{m.get('description', '')}"
-                    for i, m in enumerate(final_results)
-                ])
-                
-                system_prompt = (
-                    "You are an expert global health data translation assistant. Synthesize a concise, "
-                    "integrated answer to the user's question using ONLY the provided metadata context blocks. "
-                    "If the answer cannot be verified by the text snippets, explicitly state that the "
-                    "information is not available in the current Atlas registers. Do not invent details."
+# -----------------------------------------------------------------
+# 🤖 SYNTHESIS GENERATION PHASE
+# -----------------------------------------------------------------
+st.markdown("### 🤖 Generation Phase (Live RAG Synthesis)")
+with st.expander("See live synthesis tracking", expanded=True):
+    context_str = "\n\n".join([
+        f"[Match #{i+1} | Source: {m.get('source_dataset', 'N/A')} | Code: {m.get('variable_id', 'N/A')}]\n{m.get('description', '')}"
+        for i, m in enumerate(final_results)
+    ])
+    
+    system_prompt = (
+        "You are an expert global health data translation assistant. Synthesize a concise, "
+        "integrated answer to the user's question using ONLY the provided metadata context blocks. "
+        "If the answer cannot be verified by the text snippets, explicitly state that the "
+        "information is not available in the current Atlas registers. Do not invent details."
+    )
+    
+    user_prompt = f"Context Blocks:\n{context_str}\n\nUser Question: {user_query}"
+    
+    st.caption("**System Prompt:** " + system_prompt)
+    
+    if OLLAMA_AVAILABLE:
+        st.markdown("**Generated Response (Streaming from Llama 3.2 via Ollama):**")
+        def ollama_stream_generator():
+            try:
+                stream = ollama.chat(
+                    model="llama3.2",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    stream=True
                 )
-                
-                user_prompt = f"Context Blocks:\n{context_str}\n\nUser Question: {user_query}"
-                
-                st.caption("**System Prompt:** " + system_prompt)
-                
-                if OLLAMA_AVAILABLE:
-                    st.markdown("**Generated Response (Streaming from Llama 3.2 via Ollama):**")
-                    def ollama_stream_generator():
-                        try:
-                            stream = ollama.chat(
-                                model="llama3.2",
-                                messages=[
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt}
-                                ],
-                                stream=True
-                            )
-                            for chunk in stream:
-                                yield chunk['message']['content']
-                        except Exception as err:
-                            yield f"\n⚠️ Local Ollama daemon unreachable: {err}. Ensure `ollama serve` is running."
+                for chunk in stream:
+                    yield chunk['message']['content']
+            except Exception as err:
+                yield f"\n⚠️ Local Ollama daemon unreachable: {err}. Ensure `ollama serve` is running."
 
-                    st.write_stream(ollama_stream_generator)
-                else:
-                    st.info("💡 **Cloud Mode Active:** Ollama local LLM inference is disabled in cloud hosting environments. The dense vector matches and PyTorch neural reranked contexts above represent your retrieved RAG context window.")
+        st.write_stream(ollama_stream_generator)
+    else:
+        st.info("💡 **Cloud Mode Active:** Ollama local LLM inference is disabled in cloud hosting environments. The dense vector matches and PyTorch neural reranked contexts above represent your retrieved RAG context window.")
