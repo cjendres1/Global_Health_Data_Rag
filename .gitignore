@@ -1,9 +1,14 @@
-# Local virtual environments
-venv/
-.venv/
-env/
+# Vector Store / Local Persistence
+data/chroma_db/
+*.sqlite3
 
-# Python caching artifacts
+# Python / Environment
 __pycache__/
 *.pyc
+.env
+venv/
+.venv/
+
+# Streamlit Local Config
+.streamlit/secrets.toml
 
