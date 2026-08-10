@@ -46,16 +46,22 @@ embedder = load_vector_embedder()
 
 @st.cache_resource
 def initialize_core_pipeline():
+    # Instantiate modules inside the cached function
+    p = ClinicalQueryParser()
+    r = PyTorchNeuralReranker()
+    
     db_path = os.path.abspath("data/chroma_db")
-
-    # Trigger ingestion if DB directory is missing or empty
+    
+    # Auto-run ingestion if database directory is missing or empty (useful for Streamlit Cloud)
     if not os.path.exists(db_path) or not os.listdir(db_path):
-        st.info("⚡ Initializing vector database on fresh cloud container...")
+        import subprocess
+        st.info("⚡ Persistent vector store not found. Building database via main.py...")
         subprocess.run(["python", "main.py"], check=True)
-
+        
     client = chromadb.PersistentClient(path=db_path)
     collection = client.get_or_create_collection(name="global_health_atlas")
-    return parser, reranker, collection, db_path
+    
+    return p, r, collection, db_path
 
 try:
     parser, reranker, collection, db_path = initialize_core_pipeline()
