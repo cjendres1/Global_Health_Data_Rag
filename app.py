@@ -2,7 +2,8 @@ import os
 import streamlit as st
 import torch
 import chromadb
-import subprocess
+import pandas as pd
+
 from sentence_transformers import SentenceTransformer
 
 # Gracefully handle optional local Ollama dependency
