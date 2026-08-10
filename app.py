@@ -2,6 +2,7 @@ import os
 import streamlit as st
 import torch
 import chromadb
+import subprocess
 from sentence_transformers import SentenceTransformer
 
 # Gracefully handle optional local Ollama dependency
@@ -45,18 +46,15 @@ embedder = load_vector_embedder()
 
 @st.cache_resource
 def initialize_core_pipeline():
-    parser = ClinicalQueryParser()
-    reranker = PyTorchNeuralReranker()
-    
-    # Connect directly to persistent ChromaDB path
     db_path = os.path.abspath("data/chroma_db")
-    if not os.path.exists(db_path):
-        st.error(f"⚠️ ChromaDB database missing at `{db_path}`. Please run ingestion first.")
-        st.stop()
-        
+
+    # Trigger ingestion if DB directory is missing or empty
+    if not os.path.exists(db_path) or not os.listdir(db_path):
+        st.info("⚡ Initializing vector database on fresh cloud container...")
+        subprocess.run(["python", "main.py"], check=True)
+
     client = chromadb.PersistentClient(path=db_path)
     collection = client.get_or_create_collection(name="global_health_atlas")
-    
     return parser, reranker, collection, db_path
 
 try:
@@ -214,12 +212,18 @@ if user_query:
         else:
             for idx, item in enumerate(final_results, 1):
                 with st.container():
-                    col_meta, col_dist = st.columns([4, 1])
+                    col_meta, col_rerank, col_dist = st.columns([3, 1, 1])
                     with col_meta:
                         st.markdown(f"**Match #{idx}: `{item['variable_id']}`** — {item['variable_name']}")
                         st.caption(f"Origin Registry: `{item['source_dataset']}` | Identifier: `{item['table_id']}`")
+                    
+                    with col_rerank:
+                        # Display reranker confidence if available
+                        r_score = item.get("rerank_score", 0.0)
+                        st.metric(label="Rerank Score", value=f"{r_score:.4f}")
+                        
                     with col_dist:
-                        st.metric(label="Distance", value=f"{item['distance']:.4f}")
+                        st.metric(label="Chroma Distance", value=f"{item['distance']:.4f}")
                     
                     st.text_area(
                         label="Metadata Context Payload",
