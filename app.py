@@ -1,9 +1,12 @@
 import os
+import sqlite3
+import hashlib
+import subprocess
+import numpy as np
+import pandas as pd
 import streamlit as st
 import torch
 import chromadb
-import pandas as pd
-
 from sentence_transformers import SentenceTransformer
 
 # Gracefully handle optional local Ollama dependency
@@ -47,15 +50,13 @@ embedder = load_vector_embedder()
 
 @st.cache_resource
 def initialize_core_pipeline():
-    # Instantiate modules inside the cached function
     p = ClinicalQueryParser()
     r = PyTorchNeuralReranker()
     
     db_path = os.path.abspath("data/chroma_db")
     
-    # Auto-run ingestion if database directory is missing or empty (useful for Streamlit Cloud)
+    # Auto-run ingestion if database directory is missing or empty on cloud startup
     if not os.path.exists(db_path) or not os.listdir(db_path):
-        import subprocess
         st.info("⚡ Persistent vector store not found. Building database via main.py...")
         subprocess.run(["python", "main.py"], check=True)
         
@@ -67,7 +68,8 @@ def initialize_core_pipeline():
 try:
     parser, reranker, collection, db_path = initialize_core_pipeline()
 except Exception as e:
-    st.error(f"Initialization Failed: {e}")
+    st.error(f"⚠️ Initialization Failed during startup: {e}")
+    st.exception(e)
     st.stop()
 
 # Helper function to fetch DB stats & unique sources dynamically
@@ -76,7 +78,6 @@ def get_db_metrics():
     if total_records == 0:
         return 0, []
     
-    # Query all metadata to extract distinct sources
     metas = collection.get(include=["metadatas"])["metadatas"]
     sources = list(set(m.get("source", "unknown") for m in metas if m))
     return total_records, sorted(sources)
@@ -91,7 +92,6 @@ def query_chroma_vector_db(query_text: str, target_sources: list, max_dist: floa
     """Performs native vector similarity search over ChromaDB with source filtering."""
     query_vec = embedder.encode([query_text]).tolist()
     
-    # Construct metadata 'where' filter for ChromaDB
     where_clause = None
     if target_sources and len(target_sources) < len(available_sources):
         if len(target_sources) == 1:
@@ -111,7 +111,6 @@ def query_chroma_vector_db(query_text: str, target_sources: list, max_dist: floa
 
     scores = []
     for doc, meta, dist in zip(results["documents"][0], results["metadatas"][0], results["distances"][0]):
-        # Filter out records exceeding the user's distance threshold
         if dist <= max_dist:
             similarity = 1.0 - dist
             scores.append({
@@ -119,7 +118,7 @@ def query_chroma_vector_db(query_text: str, target_sources: list, max_dist: floa
                 "distance": dist,
                 "source_dataset": meta.get("source", "unknown"),
                 "table_id": meta.get("field_id", meta.get("label", "N/A")),
-                "variable_id": meta.get("field_id", meta.get("short_name", "N/A")),
+                "variable_id": meta.get("field_id", meta.get("short_name", meta.get("IndicatorId", "N/A"))),
                 "variable_name": meta.get("label", meta.get("title", meta.get("short_name", "Indicator"))),
                 "description": doc
             })
@@ -221,61 +220,73 @@ if user_query:
                 with st.container():
                     col_meta, col_rerank, col_dist = st.columns([3, 1, 1])
                     with col_meta:
-                        st.markdown(f"**Match #{idx}: `{item['variable_id']}`** — {item['variable_name']}")
-                        st.caption(f"Origin Registry: `{item['source_dataset']}` | Identifier: `{item['table_id']}`")
+                        st.markdown(f"**Match #{idx}: `{item.get('variable_id', 'N/A')}`** — {item.get('variable_name', 'Unnamed Variable')}")
+                        st.caption(f"Origin Registry: `{item.get('source_dataset', 'Unknown')}` | Identifier: `{item.get('table_id', 'N/A')}`")
                     
                     with col_rerank:
-                        # Display reranker confidence if available
-                        r_score = item.get("rerank_score", 0.0)
-                        st.metric(label="Rerank Score", value=f"{r_score:.4f}")
+                        st.metric(label="Rerank Score", value=f"{item.get('rerank_score', 0.0):.4f}")
                         
                     with col_dist:
-                        st.metric(label="Chroma Distance", value=f"{item['distance']:.4f}")
+                        st.metric(label="Chroma Distance", value=f"{item.get('distance', 0.0):.4f}")
                     
                     st.text_area(
                         label="Metadata Context Payload",
-                        value=item['description'],
+                        value=item.get('description', ''),
                         height=70,
                         key=f"doc_{idx}",
                         disabled=True
                     )
                     st.markdown("---")
 
-            # 2. Right after the card loop finishes, render the export tabs
-                st.markdown("### 🛠️ Export Results & Ingestion Tools")
+            # -----------------------------------------------------------------
+            # 🛠️ EXPORT RESULTS & INGESTION TOOLS
+            # -----------------------------------------------------------------
+            st.markdown("### 🛠️ Export Results & Ingestion Tools")
 
-                export_records = [ ... ]
-                df_results = pd.DataFrame(export_records)
+            export_records = [
+                {
+                    "rank": rank,
+                    "variable_id": item.get("variable_id", ""),
+                    "variable_name": item.get("variable_name", ""),
+                    "source_dataset": item.get("source_dataset", ""),
+                    "table_id": item.get("table_id", ""),
+                    "rerank_score": round(float(item.get("rerank_score", 0.0)), 4),
+                    "chroma_distance": round(float(item.get("distance", 0.0)), 4),
+                    "description": item.get("description", "")
+                }
+                for rank, item in enumerate(final_results, 1)
+            ]
+            df_results = pd.DataFrame(export_records)
 
-                tab_table, tab_code = st.tabs(["📊 Data Table & Downloads", "🐍 Python Import Script"])
+            tab_table, tab_code = st.tabs(["📊 Data Table & Downloads", "🐍 Python Import Script"])
 
-                with tab_table:
-                    # Table & CSV/JSON buttons...
-                    st.markdown("**Structured Search Results**")
-                    st.dataframe(df_results, use_container_width=True, hide_index=True)
+            with tab_table:
+                st.markdown("**Structured Search Results**")
+                st.dataframe(df_results, use_container_width=True, hide_index=True)
 
-                    col_csv, col_json = st.columns(2)
-                    with col_csv:
-                        st.download_button(
-                            label="📥 Download CSV Table",
-                            data=df_results.to_csv(index=False).encode('utf-8'),
-                            file_name="atlas_search_results.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
-                    with col_json:
-                        st.download_button(
-                            label="📥 Download JSON Metadata",
-                            data=df_results.to_json(orient="records", indent=2),
-                            file_name="atlas_search_results.json",
-                            mime="application/json",
-                            use_container_width=True
-                        )
+                col_csv, col_json = st.columns(2)
+                with col_csv:
+                    st.download_button(
+                        label="📥 Download CSV Table",
+                        data=df_results.to_csv(index=False).encode('utf-8'),
+                        file_name="atlas_search_results.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key="download_csv_btn"
+                    )
+                with col_json:
+                    st.download_button(
+                        label="📥 Download JSON Metadata",
+                        data=df_results.to_json(orient="records", indent=2),
+                        file_name="atlas_search_results.json",
+                        mime="application/json",
+                        use_container_width=True,
+                        key="download_json_btn"
+                    )
 
             with tab_code:
                 st.markdown("Copy and paste this snippet to query these exact variable IDs programmatically:")
                 
-                # Safely extract non-empty, non-None variable IDs
                 target_ids = [
                     str(item.get("variable_id")) 
                     for item in export_records 
@@ -283,28 +294,28 @@ if user_query:
                 ]
                 
                 python_snippet = f'''import pandas as pd
-            import chromadb
+import chromadb
 
-            # 1. Connect to ChromaDB instance
-            client = chromadb.PersistentClient(path="data/chroma_db")
-            collection = client.get_collection(name="global_health_atlas")
+# 1. Connect to ChromaDB instance
+client = chromadb.PersistentClient(path="data/chroma_db")
+collection = client.get_collection(name="global_health_atlas")
 
-            # 2. Target Variable Identifiers retrieved from UI search
-            target_variable_ids = {target_ids}
+# 2. Target Variable Identifiers retrieved from UI search
+target_variable_ids = {target_ids}
 
-            # 3. Retrieve metadata directly from persistent collection
-            results = collection.get(
-                ids=target_variable_ids,
-                include=["metadatas", "documents"]
-            )
+# 3. Retrieve metadata directly from persistent collection
+results = collection.get(
+    ids=target_variable_ids,
+    include=["metadatas", "documents"]
+)
 
-            # 4. Convert results into pandas DataFrame
-            df_query = pd.DataFrame(results["metadatas"])
-            df_query["description"] = results["documents"]
+# 4. Convert results into pandas DataFrame
+df_query = pd.DataFrame(results["metadatas"])
+df_query["description"] = results["documents"]
 
-            print(f"Loaded {{len(df_query)}} metadata entries.")
-            print(df_query.head())
-            '''
+print(f"Loaded {{len(df_query)}} metadata entries.")
+print(df_query.head())
+'''
                 st.code(python_snippet, language="python")
 
             # -----------------------------------------------------------------
@@ -313,7 +324,7 @@ if user_query:
             st.markdown("### 🤖 Generation Phase (Live RAG Synthesis)")
             with st.expander("See live synthesis tracking", expanded=True):
                 context_str = "\n\n".join([
-                    f"[Match #{i+1} | Source: {m['source_dataset']} | Code: {m['variable_id']}]\n{m['description']}"
+                    f"[Match #{i+1} | Source: {m.get('source_dataset', 'N/A')} | Code: {m.get('variable_id', 'N/A')}]\n{m.get('description', '')}"
                     for i, m in enumerate(final_results)
                 ])
                 
