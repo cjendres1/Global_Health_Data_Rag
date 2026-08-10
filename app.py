@@ -1,9 +1,8 @@
 import os
-import sqlite3
-import hashlib
-import numpy as np
 import streamlit as st
 import torch
+import chromadb
+from sentence_transformers import SentenceTransformer
 
 # Gracefully handle optional local Ollama dependency
 try:
@@ -17,7 +16,6 @@ except ImportError:
 # -----------------------------------------------------------------------------
 from query_parser import ClinicalQueryParser
 from neural_reranker import PyTorchNeuralReranker
-from sentence_transformers import SentenceTransformer
 
 # Clamp thread pools to prevent CPU throttling on shared cloud hosts
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -36,103 +34,93 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-
-# 1. Load the Bi-Encoder for initial SQLite vector retrieval
+# -----------------------------------------------------------------------------
+# 💡 PIPELINE & CHROMADB INITIALIZATION
+# -----------------------------------------------------------------------------
 @st.cache_resource
 def load_vector_embedder():
     return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 embedder = load_vector_embedder()
 
-def generate_vector(text: str) -> np.ndarray:
-    """Generates 384-d normalized float32 vector matching SQLite store."""
-    embedding = embedder.encode(text, convert_to_numpy=True, normalize_embeddings=True)
-    return embedding.astype(np.float32)
-
-# -----------------------------------------------------------------------------
-# 💡 PIPELINE & DATABASE INITIALIZATION
-# -----------------------------------------------------------------------------
 @st.cache_resource
 def initialize_core_pipeline():
     parser = ClinicalQueryParser()
     reranker = PyTorchNeuralReranker()
-    db_path = os.path.abspath("global_health_atlas.db")
     
+    # Connect directly to persistent ChromaDB path
+    db_path = os.path.abspath("data/chroma_db")
     if not os.path.exists(db_path):
-        st.error(f"⚠️ Vector database missing at `{db_path}`. Please run ingestion first.")
+        st.error(f"⚠️ ChromaDB database missing at `{db_path}`. Please run ingestion first.")
         st.stop()
         
-    return parser, reranker, db_path
+    client = chromadb.PersistentClient(path=db_path)
+    collection = client.get_or_create_collection(name="global_health_atlas")
+    
+    return parser, reranker, collection, db_path
 
 try:
-    parser, reranker, db_path = initialize_core_pipeline()
+    parser, reranker, collection, db_path = initialize_core_pipeline()
 except Exception as e:
     st.error(f"Initialization Failed: {e}")
     st.stop()
 
 # Helper function to fetch DB stats & unique sources dynamically
 def get_db_metrics():
-    if not os.path.exists(db_path):
+    total_records = collection.count()
+    if total_records == 0:
         return 0, []
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM health_vector_store")
-    total_records = cursor.fetchone()[0]
-    cursor.execute("SELECT DISTINCT source FROM health_vector_store WHERE source IS NOT NULL")
-    sources = [row[0] for row in cursor.fetchall()]
-    conn.close()
+    
+    # Query all metadata to extract distinct sources
+    metas = collection.get(include=["metadatas"])["metadatas"]
+    sources = list(set(m.get("source", "unknown") for m in metas if m))
     return total_records, sorted(sources)
 
 total_records, available_sources = get_db_metrics()
 source_count = len(available_sources)
 
 # -----------------------------------------------------------------------------
-# 🔍 SQLITE VECTOR RETRIEVAL LOGIC WITH METADATA FILTERING
+# 🔍 CHROMADB VECTOR RETRIEVAL LOGIC WITH METADATA FILTERING
 # -----------------------------------------------------------------------------
-def query_sqlite_vector_db(query_text: str, target_sources: list, max_dist: float, top_k: int = 15) -> list:
-    """Computes cosine similarity/distance over SQLite stored vectors with source filtering."""
-    query_vec = generate_vector(query_text)
+def query_chroma_vector_db(query_text: str, target_sources: list, max_dist: float, top_k: int = 15) -> list:
+    """Performs native vector similarity search over ChromaDB with source filtering."""
+    query_vec = embedder.encode([query_text]).tolist()
     
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
+    # Construct metadata 'where' filter for ChromaDB
+    where_clause = None
     if target_sources and len(target_sources) < len(available_sources):
-        placeholders = ','.join(['?'] * len(target_sources))
-        query = f"SELECT id, source, indicator_id, short_name, document, vector FROM health_vector_store WHERE source IN ({placeholders})"
-        cursor.execute(query, target_sources)
-    else:
-        cursor.execute("SELECT id, source, indicator_id, short_name, document, vector FROM health_vector_store")
-        
-    rows = cursor.fetchall()
-    conn.close()
+        if len(target_sources) == 1:
+            where_clause = {"source": target_sources[0]}
+        else:
+            where_clause = {"$or": [{"source": src} for src in target_sources]}
+            
+    results = collection.query(
+        query_embeddings=query_vec,
+        n_results=top_k,
+        where=where_clause,
+        include=["documents", "metadatas", "distances"]
+    )
     
-    if not rows:
+    if not results or not results["documents"] or not results["documents"][0]:
         return []
 
     scores = []
-    for row in rows:
-        doc_id, source, indicator_id, short_name, document, vec_bytes = row
-        db_vec = np.frombuffer(vec_bytes, dtype=np.float32)
-        
-        # Cosine Similarity & Distance Conversion
-        similarity = float(np.dot(query_vec, db_vec))
-        distance = 1.0 - similarity
-        
+    for doc, meta, dist in zip(results["documents"][0], results["metadatas"][0], results["distances"][0]):
         # Filter out records exceeding the user's distance threshold
-        if distance <= max_dist:
+        if dist <= max_dist:
+            similarity = 1.0 - dist
             scores.append({
                 "vector_score": similarity,
-                "distance": distance,
-                "source_dataset": source,
-                "table_id": doc_id,
-                "variable_id": indicator_id,
-                "variable_name": short_name,
-                "description": document
+                "distance": dist,
+                "source_dataset": meta.get("source", "unknown"),
+                "table_id": meta.get("field_id", meta.get("label", "N/A")),
+                "variable_id": meta.get("field_id", meta.get("short_name", "N/A")),
+                "variable_name": meta.get("label", meta.get("title", meta.get("short_name", "Indicator"))),
+                "description": doc
             })
 
-    # Sort descending by vector similarity score
     scores.sort(key=lambda x: x["vector_score"], reverse=True)
-    return scores[:top_k]
+    return scores
 
 # -----------------------------------------------------------------------------
 # 🎨 SIDEBAR CONTROL CENTER
@@ -182,7 +170,7 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.metric(label="Total Unified Records", value=total_records)
 with col2:
-    st.metric(label="Database Status", value="SQLite Active" if os.path.exists(db_path) else "Missing")
+    st.metric(label="Database Status", value="ChromaDB Active" if total_records > 0 else "Empty")
 with col3:
     st.metric(label="Harmonized Registries", value=f"{source_count} Sources")
 
@@ -199,7 +187,7 @@ if user_query:
     if not selected_sources:
         st.warning("⚠️ Please select at least one source in the sidebar to execute a search.")
     else:
-        # Step 1: spaCy Query Understanding
+        # Step 1: Query Understanding
         with st.spinner("Extracting structural semantics..."):
             parsed_data = parser.parse(user_query)
         
@@ -209,9 +197,9 @@ if user_query:
         with c_dem:
             st.caption(f"**Inferred Demographics:** {parsed_data.get('inferred_demographics', 'General')}")
 
-        # Step 2 & 3: SQLite Vector Match & PyTorch Neural Reranking
+        # Step 2 & 3: ChromaDB Vector Match & PyTorch Neural Reranking
         with st.spinner("Searching vector store & executing PyTorch reranking..."):
-            candidates = query_sqlite_vector_db(user_query, selected_sources, max_distance, top_k=n_results * 2)
+            candidates = query_chroma_vector_db(user_query, selected_sources, max_distance, top_k=n_results * 2)
             
             if candidates:
                 final_results = reranker.rerank(user_query, candidates)[:n_results]
@@ -229,7 +217,7 @@ if user_query:
                     col_meta, col_dist = st.columns([4, 1])
                     with col_meta:
                         st.markdown(f"**Match #{idx}: `{item['variable_id']}`** — {item['variable_name']}")
-                        st.caption(f"Origin Registry: `{item['source_dataset']}` | Table ID: `{item['table_id']}`")
+                        st.caption(f"Origin Registry: `{item['source_dataset']}` | Identifier: `{item['table_id']}`")
                     with col_dist:
                         st.metric(label="Distance", value=f"{item['distance']:.4f}")
                     
