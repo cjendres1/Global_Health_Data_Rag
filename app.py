@@ -240,6 +240,68 @@ if user_query:
                     )
                     st.markdown("---")
 
+            # 2. Right after the card loop finishes, render the export tabs
+                st.markdown("### 🛠️ Export Results & Ingestion Tools")
+
+                export_records = [ ... ]
+                df_results = pd.DataFrame(export_records)
+
+                tab_table, tab_code = st.tabs(["📊 Data Table & Downloads", "🐍 Python Import Script"])
+
+                with tab_table:
+                    # Table & CSV/JSON buttons...
+                    st.markdown("**Structured Search Results**")
+                    st.dataframe(df_results, use_container_width=True, hide_index=True)
+
+                    col_csv, col_json = st.columns(2)
+                    with col_csv:
+                        st.download_button(
+                            label="📥 Download CSV Table",
+                            data=df_results.to_csv(index=False).encode('utf-8'),
+                            file_name="atlas_search_results.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                    with col_json:
+                        st.download_button(
+                            label="📥 Download JSON Metadata",
+                            data=df_results.to_json(orient="records", indent=2),
+                            file_name="atlas_search_results.json",
+                            mime="application/json",
+                            use_container_width=True
+                        )
+
+                with tab_code:
+                    # Python snippet generator...
+                    st.markdown("Copy and paste this snippet to query these exact variable IDs programmatically:")
+        
+                    target_ids = [item["variable_id"] for item in export_records if item["variable_id"]]
+        
+                    python_snippet = f'''import pandas as pd
+import chromadb
+
+# 1. Connect to ChromaDB instance
+client = chromadb.PersistentClient(path="data/chroma_db")
+collection = client.get_collection(name="global_health_atlas")
+
+# 2. Target Variable Identifiers retrieved from UI search
+target_variable_ids = {target_ids}
+
+# 3. Retrieve metadata directly from persistent collection
+results = collection.get(
+    ids=target_variable_ids,
+    include=["metadatas", "documents"]
+)
+
+# 4. Convert results into pandas DataFrame
+df_query = pd.DataFrame(results["metadatas"])
+df_query["description"] = results["documents"]
+
+print(f"Loaded {{len(df_query)}} metadata entries.")
+print(df_query.head())
+'''
+                    st.code(python_snippet, language="python")
+
             # -----------------------------------------------------------------
             # 🤖 SYNTHESIS GENERATION PHASE
             # -----------------------------------------------------------------
