@@ -272,36 +272,40 @@ if user_query:
                             use_container_width=True
                         )
 
-                with tab_code:
-                    # Python snippet generator...
-                    st.markdown("Copy and paste this snippet to query these exact variable IDs programmatically:")
-        
-                    target_ids = [item["variable_id"] for item in export_records if item["variable_id"]]
-        
-                    python_snippet = f'''import pandas as pd
-import chromadb
+            with tab_code:
+                st.markdown("Copy and paste this snippet to query these exact variable IDs programmatically:")
+                
+                # Safely extract non-empty, non-None variable IDs
+                target_ids = [
+                    str(item.get("variable_id")) 
+                    for item in export_records 
+                    if item.get("variable_id") is not None and str(item.get("variable_id")).strip() != ""
+                ]
+                
+                python_snippet = f'''import pandas as pd
+            import chromadb
 
-# 1. Connect to ChromaDB instance
-client = chromadb.PersistentClient(path="data/chroma_db")
-collection = client.get_collection(name="global_health_atlas")
+            # 1. Connect to ChromaDB instance
+            client = chromadb.PersistentClient(path="data/chroma_db")
+            collection = client.get_collection(name="global_health_atlas")
 
-# 2. Target Variable Identifiers retrieved from UI search
-target_variable_ids = {target_ids}
+            # 2. Target Variable Identifiers retrieved from UI search
+            target_variable_ids = {target_ids}
 
-# 3. Retrieve metadata directly from persistent collection
-results = collection.get(
-    ids=target_variable_ids,
-    include=["metadatas", "documents"]
-)
+            # 3. Retrieve metadata directly from persistent collection
+            results = collection.get(
+                ids=target_variable_ids,
+                include=["metadatas", "documents"]
+            )
 
-# 4. Convert results into pandas DataFrame
-df_query = pd.DataFrame(results["metadatas"])
-df_query["description"] = results["documents"]
+            # 4. Convert results into pandas DataFrame
+            df_query = pd.DataFrame(results["metadatas"])
+            df_query["description"] = results["documents"]
 
-print(f"Loaded {{len(df_query)}} metadata entries.")
-print(df_query.head())
-'''
-                    st.code(python_snippet, language="python")
+            print(f"Loaded {{len(df_query)}} metadata entries.")
+            print(df_query.head())
+            '''
+                st.code(python_snippet, language="python")
 
             # -----------------------------------------------------------------
             # 🤖 SYNTHESIS GENERATION PHASE
