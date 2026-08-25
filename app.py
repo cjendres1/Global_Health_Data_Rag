@@ -239,6 +239,9 @@ def query_chroma_vector_db(
     # -------------------------------------------------------------------------
     start_chroma = time.perf_counter()
 
+# TEMPORARY DEBUG — disable source filtering
+    where_clause = None
+
     results = collection.query(
         query_embeddings=query_vec,
         n_results=top_k,
