@@ -1,8 +1,9 @@
+# app.py
+
 import os
 import time
 import subprocess
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 import torch
@@ -15,7 +16,7 @@ from neural_reranker import PyTorchNeuralReranker
 
 
 # -----------------------------------------------------------------------------
-# OPTIONAL OLLAMA
+# OPTIONAL OLLAMA DEPENDENCY
 # -----------------------------------------------------------------------------
 try:
     import ollama
@@ -38,7 +39,7 @@ torch.set_num_threads(1)
 
 
 # -----------------------------------------------------------------------------
-# STREAMLIT PAGE CONFIGURATION
+# STREAMLIT CONFIGURATION
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Global Health Data Atlas",
@@ -79,6 +80,7 @@ def initialize_core_pipeline():
 
     # Auto-build database if missing.
     if not os.path.exists(db_path) or not os.listdir(db_path):
+
         st.info(
             "⚡ Persistent vector store not found. "
             "Building database via main.py..."
@@ -101,7 +103,9 @@ def initialize_core_pipeline():
 
 try:
 
-    parser, reranker, collection, db_path = initialize_core_pipeline()
+    parser, reranker, collection, db_path = (
+        initialize_core_pipeline()
+    )
 
 except Exception as e:
 
@@ -110,12 +114,122 @@ except Exception as e:
     )
 
     st.exception(e)
-
     st.stop()
 
 
 # -----------------------------------------------------------------------------
-# DATABASE METRICS
+# TEMPORARY CHROMADB DIAGNOSTICS
+# -----------------------------------------------------------------------------
+st.markdown("### 🔧 ChromaDB Diagnostics")
+
+st.write(
+    "Collection count:",
+    collection.count(),
+)
+
+st.write(
+    "Collection metadata:",
+    collection.metadata,
+)
+
+# Peek at records directly from the collection.
+try:
+
+    peek = collection.peek(
+        limit=10,
+    )
+
+    st.write(
+        "Sample IDs:",
+        peek.get("ids"),
+    )
+
+    st.write(
+        "Sample metadata:",
+        peek.get("metadatas"),
+    )
+
+    st.write(
+        "Sample documents:",
+        peek.get("documents"),
+    )
+
+    # Check stored embedding dimensions.
+    try:
+
+        peek_embeddings = peek.get("embeddings")
+
+        if peek_embeddings:
+
+            st.write(
+                "Number of sample embeddings:",
+                len(peek_embeddings),
+            )
+
+            st.write(
+                "Embedding dimensions:",
+                [
+                    len(x)
+                    for x in peek_embeddings
+                    if x is not None
+                ],
+            )
+
+    except Exception as e:
+
+        st.write(
+            "Could not inspect sample embeddings:",
+            str(e),
+        )
+
+except Exception as e:
+
+    st.error(
+        f"Chroma peek failed: {e}"
+    )
+
+
+# -----------------------------------------------------------------------------
+# RECORD COUNTS BY SOURCE
+# -----------------------------------------------------------------------------
+try:
+
+    all_metadata = collection.get(
+        include=["metadatas"]
+    )["metadatas"]
+
+    source_counts = {}
+
+    for meta in all_metadata:
+
+        if not meta:
+            continue
+
+        source = str(
+            meta.get(
+                "source",
+                "unknown",
+            )
+        ).strip()
+
+        source_counts[source] = (
+            source_counts.get(source, 0) + 1
+        )
+
+    st.write(
+        "Records by source:",
+        source_counts,
+    )
+
+except Exception as e:
+
+    st.error(
+        f"Unable to calculate records by source: {e}"
+    )
+
+
+# -----------------------------------------------------------------------------
+# DATABASE METRICS / SOURCE NORMALIZATION
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_db_metrics():
@@ -137,7 +251,10 @@ def get_db_metrics():
             continue
 
         raw_source = str(
-            meta.get("source", "unknown")
+            meta.get(
+                "source",
+                "unknown",
+            )
         ).strip()
 
         canonical_source = raw_source.upper()
@@ -181,7 +298,7 @@ def query_chroma_vector_db(
     start_total = time.perf_counter()
 
     # -------------------------------------------------------------------------
-    # Query embedding
+    # QUERY EMBEDDING
     # -------------------------------------------------------------------------
     start_embedding = time.perf_counter()
 
@@ -191,11 +308,30 @@ def query_chroma_vector_db(
     ).tolist()
 
     embedding_seconds = (
-        time.perf_counter() - start_embedding
+        time.perf_counter()
+        - start_embedding
     )
 
     # -------------------------------------------------------------------------
-    # Construct case-insensitive source filter
+    # TEMPORARY QUERY EMBEDDING DIAGNOSTICS
+    # -------------------------------------------------------------------------
+    st.write(
+        "DEBUG — Query:",
+        query_text,
+    )
+
+    st.write(
+        "DEBUG — Query embedding dimensions:",
+        len(query_vec[0]),
+    )
+
+    st.write(
+        "DEBUG — Query embedding first 10 values:",
+        query_vec[0][:10],
+    )
+
+    # -------------------------------------------------------------------------
+    # SOURCE FILTER
     # -------------------------------------------------------------------------
     where_clause = None
 
@@ -235,12 +371,46 @@ def query_chroma_vector_db(
             }
 
     # -------------------------------------------------------------------------
-    # Chroma retrieval
+    # TEMPORARY FILTER DIAGNOSTICS
+    # -------------------------------------------------------------------------
+    st.write(
+        "DEBUG — selected_sources:",
+        target_sources,
+    )
+
+    st.write(
+        "DEBUG — available_sources:",
+        available_sources,
+    )
+
+    st.write(
+        "DEBUG — source_aliases:",
+        source_aliases,
+    )
+
+    st.write(
+        "DEBUG — where_clause BEFORE DISABLE:",
+        where_clause,
+    )
+
+    # -------------------------------------------------------------------------
+    # IMPORTANT:
+    # TEMPORARILY DISABLE SOURCE FILTERING.
+    #
+    # We are doing this to determine whether the source filter is responsible
+    # for ChromaDB returning only one candidate.
+    # -------------------------------------------------------------------------
+    where_clause = None
+
+    st.write(
+        "DEBUG — where_clause USED FOR QUERY:",
+        where_clause,
+    )
+
+    # -------------------------------------------------------------------------
+    # CHROMADB QUERY
     # -------------------------------------------------------------------------
     start_chroma = time.perf_counter()
-
-# TEMPORARY DEBUG — disable source filtering
-    where_clause = None
 
     results = collection.query(
         query_embeddings=query_vec,
@@ -253,20 +423,55 @@ def query_chroma_vector_db(
         ],
     )
 
-    st.write("DEBUG: Raw Chroma distances:", results["distances"][0])
-    st.write("DEBUG: Raw Chroma metadata:", results["metadatas"][0])
-    st.write("DEBUG: Requested top_k:", top_k)    
-
     chroma_seconds = (
-        time.perf_counter() - start_chroma
+        time.perf_counter()
+        - start_chroma
     )
 
     # -------------------------------------------------------------------------
-    # Process results
+    # RAW CHROMA DIAGNOSTICS
+    # -------------------------------------------------------------------------
+    try:
+
+        returned_count = len(
+            results["documents"][0]
+        )
+
+    except Exception:
+
+        returned_count = 0
+
+    st.write(
+        "DEBUG — Chroma requested top_k:",
+        top_k,
+    )
+
+    st.write(
+        "DEBUG — Chroma returned candidates:",
+        returned_count,
+    )
+
+    st.write(
+        "DEBUG — Raw Chroma distances:",
+        results.get("distances", [[]])[0],
+    )
+
+    st.write(
+        "DEBUG — Raw Chroma metadata:",
+        results.get("metadatas", [[]])[0],
+    )
+
+    st.write(
+        "DEBUG — Raw Chroma documents:",
+        results.get("documents", [[]])[0],
+    )
+
+    # -------------------------------------------------------------------------
+    # NO RESULTS
     # -------------------------------------------------------------------------
     if (
         not results
-        or not results["documents"]
+        or not results.get("documents")
         or not results["documents"][0]
     ):
 
@@ -285,6 +490,12 @@ def query_chroma_vector_db(
 
         return []
 
+    # -------------------------------------------------------------------------
+    # PROCESS RESULTS
+    #
+    # IMPORTANT:
+    # Distance filtering is TEMPORARILY DISABLED for this diagnostic.
+    # -------------------------------------------------------------------------
     scores = []
 
     for doc, meta, dist in zip(
@@ -293,7 +504,8 @@ def query_chroma_vector_db(
         results["distances"][0],
     ):
 
-# TEMPORARY DEBUG: do not filter on distance
+        # TEMPORARY DIAGNOSTIC:
+        # do NOT apply max_dist filtering.
         similarity = 1.0 - dist
 
         scores.append(
@@ -372,18 +584,23 @@ df_raw_combined = pd.DataFrame()
 # -----------------------------------------------------------------------------
 with st.sidebar:
 
-    st.title("🌐 Atlas Control Center")
+    st.title(
+        "🌐 Atlas Control Center"
+    )
 
     st.markdown("---")
 
-    st.subheader("🎯 Search Filtering & Tuning")
+    st.subheader(
+        "🎯 Search Filtering & Tuning"
+    )
 
     selected_sources = st.multiselect(
         "Scope to Target Registries:",
         options=available_sources,
         default=available_sources,
         help=(
-            "Select the registries to include in vector retrieval."
+            "Select the registries to include "
+            "in vector retrieval."
         ),
     )
 
@@ -391,7 +608,7 @@ with st.sidebar:
         "Maximum Chroma Distance:",
         min_value=0.00,
         max_value=1.00,
-        value=0.40,
+        value=0.70,
         step=0.01,
         format="%.2f",
         help=(
@@ -416,16 +633,19 @@ with st.sidebar:
         "Use PyTorch neural reranking",
         value=True,
         help=(
-            "Apply the cross-encoder after ChromaDB "
-            "candidate retrieval."
+            "Apply the cross-encoder after "
+            "ChromaDB candidate retrieval."
         ),
     )
 
     st.markdown("---")
 
-    st.subheader("Ingestion Status")
+    st.subheader(
+        "Ingestion Status"
+    )
 
     for src in available_sources:
+
         st.success(
             f"✅ {src} Active"
         )
@@ -440,7 +660,9 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 # MAIN INTERFACE
 # -----------------------------------------------------------------------------
-st.title("🗺️ Global Health Data Atlas AI")
+st.title(
+    "🗺️ Global Health Data Atlas AI"
+)
 
 st.markdown(
     """
@@ -459,12 +681,14 @@ st.markdown("---")
 col1, col2, col3 = st.columns(3)
 
 with col1:
+
     st.metric(
         label="Total Unified Records",
         value=total_records,
     )
 
 with col2:
+
     st.metric(
         label="Database Status",
         value=(
@@ -475,6 +699,7 @@ with col2:
     )
 
 with col3:
+
     st.metric(
         label="Harmonized Registries",
         value=source_count,
@@ -482,9 +707,11 @@ with col3:
 
 
 # -----------------------------------------------------------------------------
-# QUERY
+# SEARCH INTERFACE
 # -----------------------------------------------------------------------------
-st.markdown("### 🔍 Semantic Search & RAG Retrieval")
+st.markdown(
+    "### 🔍 Semantic Search & RAG Retrieval"
+)
 
 user_query = st.text_input(
     "Enter a clinical concept, health indicator, or survey question:",
@@ -509,7 +736,7 @@ if user_query:
     else:
 
         # ---------------------------------------------------------------------
-        # Stage 1 — spaCy query parsing
+        # SPACY QUERY PARSING
         # ---------------------------------------------------------------------
         with st.spinner(
             "Extracting structural semantics..."
@@ -543,24 +770,25 @@ if user_query:
             )
 
         # ---------------------------------------------------------------------
-        # Stage 2 — ChromaDB retrieval
+        # CHROMADB RETRIEVAL
         # ---------------------------------------------------------------------
         with st.spinner(
             "Searching vector store..."
         ):
 
-            candidates, retrieval_timing = (
-                query_chroma_vector_db(
-                    user_query,
-                    selected_sources,
-                    max_distance,
-                    top_k=n_results * 2,
-                    return_timing=True,
-                )
+            (
+                candidates,
+                retrieval_timing,
+            ) = query_chroma_vector_db(
+                user_query,
+                selected_sources,
+                max_distance,
+                top_k=n_results * 2,
+                return_timing=True,
             )
 
         # ---------------------------------------------------------------------
-        # Stage 3 — PyTorch reranking
+        # PYTORCH RERANKING
         # ---------------------------------------------------------------------
         rerank_timing = {
             "tokenization_seconds": 0.0,
@@ -595,11 +823,13 @@ if user_query:
             ]
 
         # ---------------------------------------------------------------------
-        # Timing summary
+        # TIMING SUMMARY
         # ---------------------------------------------------------------------
         total_retrieval_seconds = (
             parse_seconds
-            + retrieval_timing["retrieval_total_seconds"]
+            + retrieval_timing[
+                "retrieval_total_seconds"
+            ]
             + (
                 rerank_timing["total_seconds"]
                 if use_reranker
@@ -607,29 +837,35 @@ if user_query:
             )
         )
 
-        st.markdown("#### ⏱️ Pipeline Timing")
+        st.markdown(
+            "#### ⏱️ Pipeline Timing"
+        )
 
         timing_cols = st.columns(5)
 
         with timing_cols[0]:
+
             st.metric(
                 "spaCy",
                 f"{parse_seconds:.3f}s",
             )
 
         with timing_cols[1]:
+
             st.metric(
                 "Embedding",
                 f"{retrieval_timing['embedding_seconds']:.3f}s",
             )
 
         with timing_cols[2]:
+
             st.metric(
                 "ChromaDB",
                 f"{retrieval_timing['chroma_seconds']:.3f}s",
             )
 
         with timing_cols[3]:
+
             st.metric(
                 "PyTorch",
                 (
@@ -640,13 +876,14 @@ if user_query:
             )
 
         with timing_cols[4]:
+
             st.metric(
                 "Retrieval Total",
                 f"{total_retrieval_seconds:.3f}s",
             )
 
         # ---------------------------------------------------------------------
-        # Results
+        # DISPLAY RESULTS
         # ---------------------------------------------------------------------
         st.markdown(
             f"#### 📦 Retrieved Context Blocks "
@@ -656,8 +893,7 @@ if user_query:
         if not final_results:
 
             st.info(
-                "No records matched your search criteria "
-                "within the current distance threshold."
+                "No records matched your search criteria."
             )
 
         else:
@@ -669,8 +905,8 @@ if user_query:
 
                 with st.container():
 
-                    col_meta, col_rerank, col_dist = st.columns(
-                        [3, 1, 1]
+                    col_meta, col_rerank, col_dist = (
+                        st.columns([3, 1, 1])
                     )
 
                     with col_meta:
@@ -723,7 +959,7 @@ if user_query:
                             "description",
                             "",
                         ),
-                        height=70,
+                        height=100,
                         key=f"doc_{idx}",
                         disabled=True,
                     )
@@ -802,7 +1038,9 @@ if final_results:
                 hide_index=True,
             )
 
-            col_csv, col_json = st.columns(2)
+            col_csv, col_json = (
+                st.columns(2)
+            )
 
             with col_csv:
 
@@ -814,7 +1052,9 @@ if final_results:
                     data=df_raw_combined.to_csv(
                         index=False
                     ).encode("utf-8"),
-                    file_name="atlas_live_observations.csv",
+                    file_name=(
+                        "atlas_live_observations.csv"
+                    ),
                     mime="text/csv",
                     use_container_width=True,
                     key="download_live_csv_btn",
@@ -831,7 +1071,9 @@ if final_results:
                         orient="records",
                         indent=2,
                     ),
-                    file_name="atlas_live_observations.json",
+                    file_name=(
+                        "atlas_live_observations.json"
+                    ),
                     mime="application/json",
                     use_container_width=True,
                     key="download_live_json_btn",
@@ -840,15 +1082,17 @@ if final_results:
         else:
 
             st.info(
-                "No live observation records could be automatically "
-                "fetched for the current matches. Check API connectivity."
+                "No live observation records could be "
+                "automatically fetched for the current "
+                "matches. Check API connectivity."
             )
 
     with tab_code:
 
         st.markdown(
-            "Copy and paste this Python script to pull these "
-            "raw observations directly into your workspace or notebook:"
+            "Copy and paste this Python script to pull "
+            "these raw observations directly into your "
+            "workspace or notebook:"
         )
 
         target_ids = [
@@ -868,28 +1112,43 @@ def fetch_atlas_health_data(variable_id):
     url = f"https://ghoapi.azureedge.net/api/{{variable_id}}"
 
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(
+            url,
+            timeout=10,
+        )
 
         if res.status_code == 200:
-            data = res.json().get("value", [])
+
+            data = res.json().get(
+                "value",
+                [],
+            )
+
             df = pd.DataFrame(data)
             df["variable_id"] = variable_id
+
             return df
 
     except Exception as e:
-        print(f"Error fetching {{variable_id}}: {{e}}")
+
+        print(
+            f"Error fetching {{variable_id}}: {{e}}"
+        )
 
     return pd.DataFrame()
 
-# 2. Iterate and combine fetched observation datasets
+
 all_data = []
 
 for var_id in target_variables:
 
-    df_var = fetch_atlas_health_data(var_id)
+    df_var = fetch_atlas_health_data(
+        var_id
+    )
 
     if not df_var.empty:
         all_data.append(df_var)
+
 
 if all_data:
 
@@ -903,11 +1162,15 @@ if all_data:
         f"{{len(df_combined)}} live observation rows."
     )
 
-    print(df_combined.head())
+    print(
+        df_combined.head()
+    )
 
 else:
 
-    print("No observations returned.")
+    print(
+        "No observations returned."
+    )
 '''
 
         st.code(
@@ -934,26 +1197,32 @@ if final_results:
             [
                 (
                     f"[Match #{i + 1} | "
-                    f"Source: {m.get('source_dataset', 'N/A')} | "
-                    f"Code: {m.get('variable_id', 'N/A')}]\n"
+                    f"Source: "
+                    f"{m.get('source_dataset', 'N/A')} | "
+                    f"Code: "
+                    f"{m.get('variable_id', 'N/A')}]\n"
                     f"{m.get('description', '')}"
                 )
-                for i, m in enumerate(final_results)
+                for i, m in enumerate(
+                    final_results
+                )
             ]
         )
 
         system_prompt = (
-            "You are an expert global health data translation assistant. "
-            "Synthesize a concise, integrated answer to the user's question "
-            "using ONLY the provided metadata context blocks. "
-            "If the answer cannot be verified by the text snippets, "
-            "explicitly state that the information is not available "
-            "in the current Atlas registers. "
+            "You are an expert global health data "
+            "translation assistant. Synthesize a concise, "
+            "integrated answer to the user's question using "
+            "ONLY the provided metadata context blocks. "
+            "If the answer cannot be verified by the text "
+            "snippets, explicitly state that the information "
+            "is not available in the current Atlas registers. "
             "Do not invent details."
         )
 
         user_prompt = (
-            f"Context Blocks:\n{context_str}\n\n"
+            f"Context Blocks:\n"
+            f"{context_str}\n\n"
             f"User Question: {user_query}"
         )
 
@@ -1034,8 +1303,9 @@ if final_results:
         else:
 
             st.info(
-                "💡 **Cloud Mode Active:** Ollama local LLM inference "
-                "is disabled in cloud hosting environments. "
-                "The dense vector matches and PyTorch neural reranked "
-                "contexts above represent your retrieved RAG context window."
+                "💡 **Cloud Mode Active:** Ollama local "
+                "LLM inference is disabled in cloud hosting "
+                "environments. The dense vector matches and "
+                "PyTorch neural reranked contexts above "
+                "represent your retrieved RAG context window."
             )
