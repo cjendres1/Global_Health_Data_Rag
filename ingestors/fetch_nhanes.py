@@ -15,7 +15,8 @@ def run_ingestion(client, model, batch_size=64):
     pd_df = pd.DataFrame(raw_data).fillna("")
 
     collection = client.get_or_create_collection(
-        name="global_health_atlas"
+        name="global_health_atlas",
+        metadata={"hnsw:space": "cosine"}
     )
 
     ids = [f"nhanes_{row['Variable']}" for _, row in pd_df.iterrows()]

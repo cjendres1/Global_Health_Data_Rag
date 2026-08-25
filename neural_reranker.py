@@ -45,9 +45,14 @@ class PyTorchNeuralReranker:
         with torch.no_grad():
             outputs = self.model(**features)
             # Cross-encoder logits indicate relative contextual matching performance alignment
-            scores = outputs.logits.squeeze(-1).cpu().tolist()
-            
-            # If there's only one item, squeeze can collapse dimensions, handle edge cases safely
+            raw_scores = outputs.logits.squeeze(-1)
+
+            # Convert cross-encoder logits to a bounded 0-1 scale.
+            # This is a normalized relevance score, not a calibrated probability.
+            normalized_scores = torch.sigmoid(raw_scores)
+
+            scores = normalized_scores.cpu().tolist()
+
             if isinstance(scores, float):
                 scores = [scores]
 

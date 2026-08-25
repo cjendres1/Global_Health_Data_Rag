@@ -19,7 +19,8 @@ def run_ingestion(client, model, batch_size=64):
     pd_df = pd_df[pd_df["Language"] == "EN"]
 
     collection = client.get_or_create_collection(
-        name="global_health_atlas"
+        name="global_health_atlas",
+        metadata={"hnsw:space": "cosine"}
     )
 
     ids = [f"who_{code}" for code in pd_df["IndicatorCode"].astype(str).tolist()]

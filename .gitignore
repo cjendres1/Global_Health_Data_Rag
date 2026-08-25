@@ -1,5 +1,7 @@
 # Vector Store / Local Persistence
+data/
 data/chroma_db/
+pipelines/
 *.sqlite3
 
 # Python / Environment
@@ -11,4 +13,4 @@ venv/
 
 # Streamlit Local Config
 .streamlit/secrets.toml
-
+global_health_test.py

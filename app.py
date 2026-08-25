@@ -74,57 +74,144 @@ except Exception as e:
     st.stop()
 
 # Helper function to fetch DB stats & unique sources dynamically
+# Helper function to fetch DB stats & normalize unique sources dynamically
 def get_db_metrics():
     total_records = collection.count()
-    if total_records == 0:
-        return 0, []
-    
-    metas = collection.get(include=["metadatas"])["metadatas"]
-    sources = list(set(m.get("source", "unknown") for m in metas if m))
-    return total_records, sorted(sources)
 
-total_records, available_sources = get_db_metrics()
+    if total_records == 0:
+        return 0, {}, []
+
+    metas = collection.get(include=["metadatas"])["metadatas"]
+
+    # Map a canonical source name to the actual source values stored in Chroma.
+    # This handles values such as WHO_GHO and who_gho as one registry.
+    source_aliases = {}
+
+    for meta in metas:
+        if not meta:
+            continue
+
+        raw_source = str(meta.get("source", "unknown")).strip()
+        canonical_source = raw_source.upper()
+
+        source_aliases.setdefault(canonical_source, set()).add(raw_source)
+
+    available_sources = sorted(source_aliases.keys())
+
+    return total_records, source_aliases, available_sources
+
+
+total_records, source_aliases, available_sources = get_db_metrics()
 source_count = len(available_sources)
 
 # -----------------------------------------------------------------------------
 # 🔍 CHROMADB VECTOR RETRIEVAL LOGIC WITH METADATA FILTERING
 # -----------------------------------------------------------------------------
-def query_chroma_vector_db(query_text: str, target_sources: list, max_dist: float, top_k: int = 15) -> list:
-    """Performs native vector similarity search over ChromaDB with source filtering."""
-    query_vec = embedder.encode([query_text]).tolist()
-    
+def query_chroma_vector_db(
+    query_text: str,
+    target_sources: list,
+    max_dist: float,
+    top_k: int = 15
+) -> list:
+    """
+    Performs semantic vector search over ChromaDB with case-insensitive
+    source filtering.
+
+    ChromaDB is configured to use cosine distance, so lower distance
+    means greater semantic similarity.
+    """
+    query_vec = embedder.encode(
+        [query_text],
+        normalize_embeddings=True
+    ).tolist()
+
     where_clause = None
+
+    # Only apply a source filter if the user has excluded at least one
+    # canonical registry.
     if target_sources and len(target_sources) < len(available_sources):
-        if len(target_sources) == 1:
-            where_clause = {"source": target_sources[0]}
-        else:
-            where_clause = {"$or": [{"source": src} for src in target_sources]}
-            
+
+        # Convert canonical source names back to all actual values present
+        # in ChromaDB, e.g. WHO_GHO -> ["WHO_GHO", "who_gho"].
+        actual_sources = []
+
+        for source in target_sources:
+            actual_sources.extend(
+                source_aliases.get(source, [])
+            )
+
+        actual_sources = sorted(set(actual_sources))
+
+        if len(actual_sources) == 1:
+            where_clause = {
+                "source": actual_sources[0]
+            }
+        elif actual_sources:
+            where_clause = {
+                "$or": [
+                    {"source": src}
+                    for src in actual_sources
+                ]
+            }
+
     results = collection.query(
         query_embeddings=query_vec,
         n_results=top_k,
         where=where_clause,
         include=["documents", "metadatas", "distances"]
     )
-    
-    if not results or not results["documents"] or not results["documents"][0]:
+
+    if (
+        not results
+        or not results["documents"]
+        or not results["documents"][0]
+    ):
         return []
 
     scores = []
-    for doc, meta, dist in zip(results["documents"][0], results["metadatas"][0], results["distances"][0]):
+
+    for doc, meta, dist in zip(
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0]
+    ):
         if dist <= max_dist:
-            similarity = 1.0 - dist
             scores.append({
-                "vector_score": similarity,
+                "vector_score": 1.0 - dist,
                 "distance": dist,
                 "source_dataset": meta.get("source", "unknown"),
-                "table_id": meta.get("field_id", meta.get("label", "N/A")),
-                "variable_id": meta.get("field_id", meta.get("short_name", meta.get("IndicatorId", "N/A"))),
-                "variable_name": meta.get("label", meta.get("title", meta.get("short_name", "Indicator"))),
+                "table_id": meta.get(
+                    "field_id",
+                    meta.get("label", "N/A")
+                ),
+                "variable_id": meta.get(
+                    "field_id",
+                    meta.get(
+                        "variable",
+                        meta.get(
+                            "short_name",
+                            meta.get("IndicatorId", "N/A")
+                        )
+                    )
+                ),
+                "variable_name": meta.get(
+                    "label",
+                    meta.get(
+                        "title",
+                        meta.get(
+                            "short_name",
+                            "Indicator"
+                        )
+                    )
+                ),
                 "description": doc
             })
 
-    scores.sort(key=lambda x: x["vector_score"], reverse=True)
+    scores.sort(
+        key=lambda x: x["vector_score"],
+        reverse=True
+    )
+
     return scores
 
 # -----------------------------------------------------------------------------
@@ -143,12 +230,16 @@ with st.sidebar:
     )
     
     max_distance = st.slider(
-        "Maximum Distance Threshold:",
-        min_value=0.0,
-        max_value=2.0,
-        value=1.5,
-        step=0.1,
-        help="Lower values enforce strict matching. Higher values allow looser conceptual connections."
+        "Maximum Chroma Distance:",
+        min_value=0.00,
+        max_value=1.00,
+        value=0.40,
+        step=0.01,
+        help=(
+            "Cosine distance threshold. Lower values require closer semantic "
+            "matches; higher values allow broader matches."
+        ),
+        format="%.2f"
     )
     
     st.markdown("---")
@@ -225,7 +316,7 @@ if user_query:
                         st.caption(f"Origin Registry: `{item.get('source_dataset', 'Unknown')}` | Identifier: `{item.get('table_id', 'N/A')}`")
                     
                     with col_rerank:
-                        st.metric(label="Rerank Score", value=f"{item.get('rerank_score', 0.0):.4f}")
+                        st.metric(label="Neural Relevance", value=f"{item.get('rerank_score', 0.0):.3f}")
                         
                     with col_dist:
                         st.metric(label="Chroma Distance", value=f"{item.get('distance', 0.0):.4f}")

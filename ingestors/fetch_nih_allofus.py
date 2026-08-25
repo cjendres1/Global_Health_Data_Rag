@@ -28,7 +28,8 @@ def run_ingestion(client, model, batch_size=64):
     pd_df = pd_df.fillna("")
 
     collection = client.get_or_create_collection(
-        name="global_health_atlas"
+        name="global_health_atlas",
+        metadata={"hnsw:space": "cosine"}
     )
 
     ids = [f"allofus_{row['question_code'] or row['concept_id'] or idx}" for idx, row in pd_df.iterrows()]

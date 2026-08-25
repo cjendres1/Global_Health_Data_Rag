@@ -22,7 +22,8 @@ def run_ingestion(client, model, batch_size=64):
     pd_df = pd_df.drop_duplicates(subset=["IndicatorId"], keep="first").reset_index(drop=True)
     
     collection = client.get_or_create_collection(
-        name="global_health_atlas"
+        name="global_health_atlas",
+        metadata={"hnsw:space": "cosine"}
     )
     
     ids = [f"usaid_{id_}" for id_ in pd_df["IndicatorId"].astype(str).tolist()]

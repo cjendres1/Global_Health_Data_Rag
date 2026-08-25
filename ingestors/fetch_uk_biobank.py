@@ -64,7 +64,10 @@ def run_ingestion(client, model, batch_size=64):
     raw_df = raw_df.fillna("").astype(str)
     raw_df = raw_df.drop_duplicates(subset=["field_id"], keep="first").reset_index(drop=True)
     
-    collection = client.get_or_create_collection(name="global_health_atlas")
+    collection = client.get_or_create_collection(
+        name="global_health_atlas",
+        metadata={"hnsw:space": "cosine"}
+    )
     
     ids = [f"ukbb_{fid}" for fid in raw_df["field_id"].tolist()]
     documents = [
