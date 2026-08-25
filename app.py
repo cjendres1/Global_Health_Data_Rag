@@ -291,49 +291,49 @@ def query_chroma_vector_db(
     ):
 
 # TEMPORARY DEBUG: do not filter on distance
-    similarity = 1.0 - dist
+        similarity = 1.0 - dist
 
-    scores.append(
-        {
-            "vector_score": similarity,
-            "distance": dist,
-            "source_dataset": meta.get(
-                "source",
-                "unknown",
-            ),
-            "table_id": meta.get(
-                "field_id",
-                meta.get(
-                    "label",
-                    "N/A",
+        scores.append(
+            {
+                "vector_score": similarity,
+                "distance": dist,
+                "source_dataset": meta.get(
+                    "source",
+                    "unknown",
                 ),
-            ),
-            "variable_id": meta.get(
-                "field_id",
-                meta.get(
-                    "variable",
+                "table_id": meta.get(
+                    "field_id",
                     meta.get(
-                        "short_name",
+                        "label",
+                        "N/A",
+                    ),
+                ),
+                "variable_id": meta.get(
+                    "field_id",
+                    meta.get(
+                        "variable",
                         meta.get(
-                            "IndicatorId",
-                            "N/A",
+                            "short_name",
+                            meta.get(
+                                "IndicatorId",
+                                "N/A",
+                            ),
                         ),
                     ),
                 ),
-            ),
-            "variable_name": meta.get(
-                "label",
-                meta.get(
-                    "title",
+                "variable_name": meta.get(
+                    "label",
                     meta.get(
-                        "short_name",
-                        "Indicator",
+                        "title",
+                        meta.get(
+                            "short_name",
+                            "Indicator",
+                        ),
                     ),
                 ),
-            ),
-            "description": doc,
-        }
-    )
+                "description": doc,
+            }
+        )
 
     scores.sort(
         key=lambda x: x["vector_score"],
