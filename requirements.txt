@@ -3,6 +3,7 @@ chromadb
 sentence-transformers
 spacy
 torch
+torchvision
 transformers
 pandas
 onnxruntime
