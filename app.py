@@ -334,6 +334,7 @@ if user_query:
 # 🛠️ LIVE DATA EXPORT & AUTOMATED INGESTION
 # -----------------------------------------------------------------
 # Check that final_results is defined and contains retrieved records
+df_raw_combined = pd.DataFrame()
 if 'final_results' in locals() and final_results:
 
     # Extract the records to export from your retrieved/reranked search results
