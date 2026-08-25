@@ -333,8 +333,12 @@ if user_query:
 # -----------------------------------------------------------------
 # 🛠️ LIVE DATA EXPORT & AUTOMATED INGESTION
 # -----------------------------------------------------------------
-# Check that final_results is defined and contains retrieved records
+
+# Initialize variables so they always exist during Streamlit reruns
+export_records = []
 df_raw_combined = pd.DataFrame()
+
+# Check that final_results is defined and contains retrieved records
 if 'final_results' in locals() and final_results:
 
     # Extract the records to export from your retrieved/reranked search results
@@ -351,7 +355,10 @@ if 'final_results' in locals() and final_results:
 
     with st.spinner("Fetching live health observations across retrieved match endpoints..."):
         # Pull actual health observations for top matches
-        df_raw_combined = fetch_all_live_data(export_records, limit_per_var=50)
+        df_raw_combined = fetch_all_live_data(
+            export_records,
+            limit_per_var=50
+        )
 
 tab_table, tab_code = st.tabs(["📊 Raw Observation Data", "🐍 Python Import Script"])
 
