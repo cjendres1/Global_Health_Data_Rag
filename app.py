@@ -279,6 +279,7 @@ user_query = st.text_input(
 
 n_results = st.slider("Max context matches to retrieve:", min_value=1, max_value=10, value=5)
 
+final_results = []
 if user_query:
     if not selected_sources:
         st.warning("⚠️ Please select at least one source in the sidebar to execute a search.")
