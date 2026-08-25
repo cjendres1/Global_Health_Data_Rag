@@ -250,6 +250,10 @@ def query_chroma_vector_db(
         ],
     )
 
+    st.write("DEBUG: Raw Chroma distances:", results["distances"][0])
+    st.write("DEBUG: Raw Chroma metadata:", results["metadatas"][0])
+    st.write("DEBUG: Requested top_k:", top_k)    
+
     chroma_seconds = (
         time.perf_counter() - start_chroma
     )
@@ -286,51 +290,50 @@ def query_chroma_vector_db(
         results["distances"][0],
     ):
 
-        if dist <= max_dist:
+# TEMPORARY DEBUG: do not filter on distance
+    similarity = 1.0 - dist
 
-            similarity = 1.0 - dist
-
-            scores.append(
-                {
-                    "vector_score": similarity,
-                    "distance": dist,
-                    "source_dataset": meta.get(
-                        "source",
-                        "unknown",
-                    ),
-                    "table_id": meta.get(
-                        "field_id",
+    scores.append(
+        {
+            "vector_score": similarity,
+            "distance": dist,
+            "source_dataset": meta.get(
+                "source",
+                "unknown",
+            ),
+            "table_id": meta.get(
+                "field_id",
+                meta.get(
+                    "label",
+                    "N/A",
+                ),
+            ),
+            "variable_id": meta.get(
+                "field_id",
+                meta.get(
+                    "variable",
+                    meta.get(
+                        "short_name",
                         meta.get(
-                            "label",
+                            "IndicatorId",
                             "N/A",
                         ),
                     ),
-                    "variable_id": meta.get(
-                        "field_id",
-                        meta.get(
-                            "variable",
-                            meta.get(
-                                "short_name",
-                                meta.get(
-                                    "IndicatorId",
-                                    "N/A",
-                                ),
-                            ),
-                        ),
+                ),
+            ),
+            "variable_name": meta.get(
+                "label",
+                meta.get(
+                    "title",
+                    meta.get(
+                        "short_name",
+                        "Indicator",
                     ),
-                    "variable_name": meta.get(
-                        "label",
-                        meta.get(
-                            "title",
-                            meta.get(
-                                "short_name",
-                                "Indicator",
-                            ),
-                        ),
-                    ),
-                    "description": doc,
-                }
-            )
+                ),
+            ),
+            "description": doc,
+        }
+    )
 
     scores.sort(
         key=lambda x: x["vector_score"],
@@ -1033,4 +1036,3 @@ if final_results:
                 "The dense vector matches and PyTorch neural reranked "
                 "contexts above represent your retrieved RAG context window."
             )
-            
